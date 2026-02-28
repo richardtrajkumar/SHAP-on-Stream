@@ -1,11 +1,11 @@
 # SHAP-on-Stream
 A prototype for SHAP-on-Stream implementation for:
-Sliding window approximation
-Incremental Shapley updates
-Drift-aware decay (ADWIN-style via river)
-Feature subsampling
-Fidelity vs offline SHAP comparison
-Latency measurement
+Sliding window approximation,
+Incremental Shapley updates,
+Drift-aware decay (ADWIN-style via river),
+Feature subsampling,
+Fidelity vs offline SHAP comparison,
+Latency measurement, and
 Streaming synthetic monitoring telemetry
 
 Example: 
