@@ -1,0 +1,175 @@
+pip install numpy pandas scikit-learn shap river matplotlib scipy
+
+### Imports
+import numpy as np
+import pandas as pd
+import shap
+import time
+import random
+from collections import deque
+
+from sklearn.ensemble import RandomForestRegressor
+from sklearn.linear_model import LinearRegression
+from sklearn.metrics import mean_squared_error
+from sklearn.feature_selection import mutual_info_regression
+
+from river.drift import ADWIN
+
+
+### Sythetic Monitoring Stream Generator
+# Simulates CPU IO Network Memory Lateny_target Concept_drift 
+
+def generate_stream(n_samples=2000, drift_point=1000):
+    data = []
+
+    for t in range(n_samples):
+        cpu = np.random.normal(50, 10)
+        io = np.random.normal(100, 20)
+        net = np.random.normal(200, 40)
+        mem = np.random.normal(70, 15)
+
+        # Concept drift after drift_point
+        if t > drift_point:
+            latency = 0.7 * cpu + 0.1 * io + 0.5 * net + np.random.normal(0, 5)
+        else:
+            latency = 0.4 * cpu + 0.6 * io + 0.2 * net + np.random.normal(0, 5)
+
+        data.append([cpu, io, net, mem, latency])
+
+    df = pd.DataFrame(data, columns=["cpu", "io", "net", "mem", "latency"])
+    return df
+
+
+### Defining SHAP on Stream Engine
+# Implements a Sliding window W 
+# Implements Incremental update
+# Implements drift aware decay
+# Implements feature subsampling
+# Implements Surrogate local model 
+class SHAPOnStream:
+
+    def __init__(self, model, window_size=100, alpha_high=0.9, alpha_low=0.5):
+        self.model = model
+        self.window_size = window_size
+        self.alpha_high = alpha_high
+        self.alpha_low = alpha_low
+        self.window = deque(maxlen=window_size)
+        self.phi = None
+        self.drift_detector = ADWIN()
+        self.latencies = []
+
+    def select_features(self, X, y, k=3):
+        mi = mutual_info_regression(X, y)
+        idx = np.argsort(mi)[-k:]
+        return idx
+
+    def compute_local_shap(self, x_instance):
+        explainer = shap.TreeExplainer(self.model)
+        shap_values = explainer.shap_values(x_instance)
+        return shap_values[0]
+
+    def update(self, x, y):
+        start_time = time.time()
+
+        self.window.append((x, y))
+
+        X_window = np.array([w[0] for w in self.window])
+        y_window = np.array([w[1] for w in self.window])
+
+        if len(X_window) < 10:
+            return None
+
+        # Feature subsampling
+        selected_idx = self.select_features(X_window, y_window)
+
+        x_selected = x.reshape(1, -1)
+
+        # Local surrogate (fast linear model)
+        surrogate = LinearRegression()
+        surrogate.fit(X_window[:, selected_idx], y_window)
+
+        delta_phi = surrogate.coef_
+
+        # Drift detection
+        error = abs(self.model.predict(x_selected)[0] - y)
+        self.drift_detector.update(error)
+
+        if self.drift_detector.drift_detected:
+            alpha = self.alpha_low
+        else:
+            alpha = self.alpha_high
+
+        # Incremental update
+        if self.phi is None:
+            self.phi = np.zeros(len(selected_idx))
+
+        self.phi = alpha * self.phi + (1 - alpha) * delta_phi
+
+        latency = (time.time() - start_time) * 1000
+        self.latencies.append(latency)
+
+        return self.phi
+
+
+### Training Initial Model
+df = generate_stream()
+X = df[["cpu", "io", "net", "mem"]].values
+y = df["latency"].values
+
+initial_train = 200
+
+model = RandomForestRegressor(n_estimators=50)
+model.fit(X[:initial_train], y[:initial_train])
+
+stream_engine = SHAPOnStream(model)
+
+
+### Streaming Execution
+stream_shap_values = []
+
+for i in range(initial_train, len(X)):
+    x_instance = X[i]
+    y_true = y[i]
+
+    phi = stream_engine.update(x_instance, y_true)
+
+    if phi is not None:
+        stream_shap_values.append(phi)
+
+
+### Evaluation Metrics
+
+# for Latency
+print("Average Explanation Latency (ms):",
+      np.mean(stream_engine.latencies))
+
+# for Stability
+stability = np.var(stream_shap_values, axis=0)
+print("Streaming SHAP Stability (variance per feature):", stability)
+
+# Fidelity vs Offline SHAP
+explainer = shap.TreeExplainer(model)
+offline_shap = explainer.shap_values(X[initial_train:initial_train+200])
+
+fidelity_error = mean_squared_error(
+    offline_shap[:, :len(stream_engine.phi)],
+    stream_shap_values[:200]
+)
+
+print("Fidelity MSE vs Offline SHAP:", fidelity_error)
+
+
+### Visualization
+import matplotlib.pyplot as plt
+
+stream_shap_array = np.array(stream_shap_values)
+
+plt.figure()
+for i in range(stream_shap_array.shape[1]):
+    plt.plot(stream_shap_array[:, i], label=f"Feature {i}")
+
+plt.title("Streaming SHAP Values Over Time")
+plt.xlabel("Time")
+plt.ylabel("Attribution")
+plt.legend()
+plt.show()
